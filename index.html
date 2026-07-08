@@ -4,6 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>로또 추첨기</title>
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-Y13JZ3VQEZ"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+
+    gtag('config', 'G-Y13JZ3VQEZ');
+  </script>
   <style>
     :root {
       --ink: #111111;
@@ -603,7 +612,9 @@
     </div>
   </main>
 
-  <script>
+  <script type="module">
+    import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+
     const ballsEl = document.getElementById('balls');
     const historyListEl = document.getElementById('historyList');
     const officialListEl = document.getElementById('officialList');
@@ -612,6 +623,18 @@
     const statusEl = document.getElementById('status');
     const latestSetEl = document.getElementById('latestSet');
     const latestBonusEl = document.getElementById('latestBonus');
+
+    const SUPABASE_URL = 'https://idzemxvuqzvwzxvikyst.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlkemVteHZ1cXp2d3p4dmlreXN0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMzOTUzMzAsImV4cCI6MjA5ODk3MTMzMH0.KWFpf87QTZsA_JgqrnISA8_dU_awQ-a_34pv_iRlZBo';
+    const SUPABASE_TABLE = 'lotto_draw_results';
+
+    const supabaseEnabled =
+      !SUPABASE_URL.includes('YOUR_PROJECT_ID') &&
+      !SUPABASE_ANON_KEY.includes('YOUR_SUPABASE_ANON_KEY');
+
+    const supabase = supabaseEnabled
+      ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+      : null;
 
     const history = [];
 
@@ -656,6 +679,30 @@
       return { numbers: picked, bonus };
     }
 
+    function formatDate(value) {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) {
+        return '';
+      }
+
+      return date.toLocaleString('ko-KR', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    }
+
+    function normalizeHistoryEntry(row) {
+      return {
+        id: row?.id ?? crypto.randomUUID(),
+        numbers: Array.isArray(row?.numbers) ? row.numbers : [],
+        bonus: Number(row?.bonus ?? 0),
+        createdAt: row?.created_at ?? row?.createdAt ?? new Date().toISOString(),
+      };
+    }
+
     function renderBalls(result) {
       ballsEl.innerHTML = '';
 
@@ -676,7 +723,7 @@
       historyListEl.innerHTML = '';
 
       if (history.length === 0) {
-        historyListEl.innerHTML = '<div class="badge-sale-text">아직 기록이 없습니다. 첫 추첨을 해보세요.</div>';
+        historyListEl.innerHTML = '<div class="badge-sale-text">No saved draws yet. Start your first draw.</div>';
         return;
       }
 
@@ -685,8 +732,8 @@
         item.className = 'history-item';
         item.innerHTML = `
           <div class="history-head">
-            <div class="history-round">${history.length - index} 회차</div>
-            <div class="history-date">Local draw</div>
+            <div class="history-round">#${index + 1}</div>
+            <div class="history-date">${formatDate(entry.createdAt)}</div>
           </div>
           <div class="history-row">
             ${entry.numbers.map((n) => `<div class="ball small">${n}</div>`).join('')}
@@ -705,7 +752,7 @@
         item.className = 'history-item';
         item.innerHTML = `
           <div class="history-head">
-            <div class="history-round">${draw.round} 회차</div>
+            <div class="history-round">${draw.round}회차</div>
             <div class="history-date">${draw.date}</div>
           </div>
           <div class="history-row">
@@ -717,29 +764,92 @@
       });
     }
 
-    function draw() {
-      const result = generateLotto();
-      history.unshift(result);
-      renderBalls(result);
+    function setStatus(message) {
+      statusEl.textContent = message;
+    }
+
+    async function loadHistory() {
+      if (!supabase) {
+        setStatus('Supabase config is missing. Add URL and anon key to enable DB saving.');
+        return;
+      }
+
+      setStatus('Loading saved draw results...');
+
+      const { data, error } = await supabase
+        .from(SUPABASE_TABLE)
+        .select('id, numbers, bonus, created_at')
+        .order('created_at', { ascending: false })
+        .limit(6);
+
+      if (error) {
+        console.error(error);
+        setStatus('Failed to load saved results. Check the table and permissions.');
+        return;
+      }
+
+      history.splice(0, history.length, ...(data ?? []).map(normalizeHistoryEntry));
       renderHistory();
+      setStatus('Loaded recent results from Supabase.');
+    }
+
+    async function saveResult(result) {
+      if (!supabase) {
+        return null;
+      }
+
+      const payload = {
+        numbers: result.numbers,
+        bonus: result.bonus,
+      };
+
+      const { data, error } = await supabase
+        .from(SUPABASE_TABLE)
+        .insert(payload)
+        .select('id, numbers, bonus, created_at')
+        .single();
+
+      if (error) {
+        throw error;
+      }
+
+      return data;
+    }
+
+    async function draw() {
+      const result = generateLotto();
+      renderBalls(result);
       latestSetEl.textContent = result.numbers.join(', ');
       latestBonusEl.textContent = result.bonus;
-      statusEl.textContent = '추첨 완료';
+      setStatus('Saving draw result...');
+
+      try {
+        const savedRow = await saveResult(result);
+        history.unshift(normalizeHistoryEntry(savedRow ?? result));
+        renderHistory();
+        setStatus(savedRow ? 'Draw complete, saved to Supabase.' : 'Draw complete, local only.');
+      } catch (error) {
+        console.error(error);
+        history.unshift(normalizeHistoryEntry(result));
+        renderHistory();
+        setStatus('Draw complete, but DB save failed.');
+      }
     }
 
     function resetHistory() {
       history.length = 0;
-      ballsEl.innerHTML = '<div class="badge-sale-text">아직 추첨 전입니다.</div>';
-      historyListEl.innerHTML = '<div class="badge-sale-text">아직 기록이 없습니다. 첫 추첨을 해보세요.</div>';
+      ballsEl.innerHTML = '<div class="badge-sale-text">No draw has been entered yet.</div>';
+      historyListEl.innerHTML = '<div class="badge-sale-text">No saved draws yet. Start your first draw.</div>';
       latestSetEl.textContent = '-';
       latestBonusEl.textContent = '-';
-      statusEl.textContent = '기록이 초기화되었습니다';
+      setStatus('History cleared.');
     }
 
     drawBtn.addEventListener('click', draw);
     resetBtn.addEventListener('click', resetHistory);
 
     renderOfficial();
+    await loadHistory();
   </script>
 </body>
 </html>
